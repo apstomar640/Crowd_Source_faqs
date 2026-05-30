@@ -24,6 +24,8 @@ export async function initDb() {
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
+      role TEXT DEFAULT 'intern',
+      is_verified INTEGER DEFAULT 0,
       reputation INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now'))
     );
@@ -36,6 +38,8 @@ export async function initDb() {
       category TEXT NOT NULL,
       tags TEXT DEFAULT '[]',
       views INTEGER DEFAULT 0,
+      is_faq INTEGER DEFAULT 0,
+      promoted_at TEXT DEFAULT NULL,
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
@@ -61,6 +65,22 @@ export async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
   `);
+
+  // Migration: add is_faq column if it doesn't exist
+  try {
+    db.run('ALTER TABLE questions ADD COLUMN is_faq INTEGER DEFAULT 0');
+  } catch(e) { /* column already exists */ }
+  try {
+    db.run('ALTER TABLE questions ADD COLUMN promoted_at TEXT DEFAULT NULL');
+  } catch(e) { /* column already exists */ }
+  
+  // Migration: add role and is_verified columns to users
+  try {
+    db.run('ALTER TABLE users ADD COLUMN role TEXT DEFAULT "intern"');
+  } catch(e) { /* column already exists */ }
+  try {
+    db.run('ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0');
+  } catch(e) { /* column already exists */ }
 
   // Seed if empty
   const result = db.exec('SELECT COUNT(*) as count FROM users');
@@ -97,8 +117,8 @@ async function seed() {
     { id: uuidv4(), name: 'Zara Khan',       email: 'zara@university.edu',  reputation: 97  },
   ];
 
-  const insertUser = db.prepare('INSERT INTO users (id, name, email, password_hash, reputation) VALUES (?, ?, ?, ?, ?)');
-  for (const u of users) { insertUser.run([u.id, u.name, u.email, hash, u.reputation]); }
+  const insertUser = db.prepare('INSERT INTO users (id, name, email, password_hash, role, is_verified, reputation) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  for (const u of users) { insertUser.run([u.id, u.name, u.email, hash, 'intern', 1, u.reputation]); }
   insertUser.free();
 
   const questionsData = [

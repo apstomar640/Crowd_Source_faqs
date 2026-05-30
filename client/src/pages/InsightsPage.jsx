@@ -2,8 +2,41 @@ import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { TrendingUp, Users, MessageSquare, CheckCircle, Zap, Activity, Loader, ExternalLink } from 'lucide-react';
+import { TrendingUp, Users, MessageSquare, CheckCircle, Zap, Activity, Loader, ExternalLink, Search, Trophy } from 'lucide-react';
 import { officialFAQs, communityQuestions } from '../data/faqs.js';
+import { LeaderboardWidget } from '../components/Leaderboard.jsx';
+
+// ─── Search Query Analytics (localStorage-backed) ─────────────────────────
+export function trackSearchQuery(query, resultCount, topFaqId) {
+  try {
+    const key = 'yaksha_search_analytics';
+    const data = JSON.parse(localStorage.getItem(key) || '[]');
+    data.push({ query, resultCount, topFaqId, timestamp: Date.now() });
+    // Keep last 200 entries
+    if (data.length > 200) data.splice(0, data.length - 200);
+    localStorage.setItem(key, JSON.stringify(data));
+  } catch { /* quota exceeded */ }
+}
+
+function getSearchAnalytics() {
+  try {
+    const data = JSON.parse(localStorage.getItem('yaksha_search_analytics') || '[]');
+    // Aggregate: most searched terms
+    const termCounts = {};
+    const noResults = [];
+    for (const entry of data) {
+      const q = entry.query.toLowerCase().trim();
+      termCounts[q] = (termCounts[q] || 0) + 1;
+      if (entry.resultCount === 0) noResults.push(q);
+    }
+    const topSearches = Object.entries(termCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([term, count]) => ({ term, count }));
+    const uniqueNoResults = [...new Set(noResults)].slice(0, 5);
+    return { topSearches, noResults: uniqueNoResults, totalSearches: data.length };
+  } catch { return { topSearches: [], noResults: [], totalSearches: 0 }; }
+}
 
 const stagger = { animate: { transition: { staggerChildren: 0.08 } } };
 const fadeUp = { initial: { opacity: 0, y: 20 }, animate: { opacity: 1, y: 0, transition: { duration: 0.4 } } };
@@ -246,7 +279,8 @@ export default function InsightsPage() {
                 <div className="text-[10px] text-gray-600 flex items-center">{row.hour}</div>
                 {['mon','tue','wed','thu','fri','sat','sun'].map(d => {
                   const v = row[d] || 0;
-                  const intensity = Math.min(v / 10, 1);
+                  const maxVal = Math.max(...stats.heatmapData.flatMap(r => ['mon','tue','wed','thu','fri','sat','sun'].map(d2 => r[d2] || 0)), 1);
+                  const intensity = Math.min(v / maxVal, 1);
                   return (
                     <div
                       key={d}
@@ -307,44 +341,60 @@ export default function InsightsPage() {
           )}
         </motion.div>
 
-        {/* Top Contributors */}
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.45 }} className="glass rounded-xl p-6">
-          <h3 className="font-outfit font-bold text-sm text-gray-200 mb-4 flex items-center gap-2">
-            <Users size={15} className="text-secondary" />
-            Top Contributors
-          </h3>
-          {stats.topContributors && stats.topContributors.length > 0 ? (
-            <div className="flex flex-col gap-3">
-              {stats.topContributors.map((user, i) => (
-                <div key={user.id} className="flex items-center gap-3">
-                  <span className="text-xs font-bold text-gray-600 w-4">{i + 1}</span>
-                  <div className="w-8 h-8 rounded-full bg-secondary/15 flex items-center justify-center flex-shrink-0">
-                    <span className="text-xs font-bold text-secondary">
-                      {user.name.charAt(0).toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-gray-300 truncate">{user.name}</p>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <div className="h-1.5 bg-white/[0.04] rounded-full overflow-hidden flex-1">
-                        <div
-                          className="h-full rounded-full bg-gradient-to-r from-secondary to-accent"
-                          style={{
-                            width: `${Math.max(10, (user.reputation / (stats.topContributors[0]?.reputation || 1)) * 100)}%`,
-                          }}
-                        />
-                      </div>
-                      <span className="text-[10px] text-gray-500 flex-shrink-0">{user.reputation} rep</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-gray-600">No contributors yet.</p>
-          )}
+        {/* Top Contributors — powered by Leaderboard widget */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.45 }}>
+          <LeaderboardWidget />
         </motion.div>
       </div>
+
+      {/* Search Analytics */}
+      {(() => {
+        const analytics = getSearchAnalytics();
+        if (analytics.totalSearches === 0) return null;
+        return (
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.48 }} className="glass rounded-xl p-6 mt-6">
+            <h3 className="font-outfit font-bold text-sm text-gray-200 mb-1 flex items-center gap-2">
+              <Search size={15} className="text-primary" />
+              Search Analytics
+            </h3>
+            <p className="text-[11px] text-gray-500 mb-5">{analytics.totalSearches} total searches tracked locally</p>
+            <div className="grid sm:grid-cols-2 gap-6">
+              {/* Most searched */}
+              <div>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Most Searched</p>
+                <div className="flex flex-col gap-2">
+                  {analytics.topSearches.map((s, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                      <span className="text-[10px] text-gray-600 w-4">{i + 1}</span>
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-gray-300">{s.term}</span>
+                          <span className="text-[10px] text-gray-600">{s.count}x</span>
+                        </div>
+                        <div className="h-1 bg-white/[0.04] rounded-full overflow-hidden">
+                          <div className="h-full rounded-full bg-primary" style={{ width: `${(s.count / analytics.topSearches[0].count) * 100}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {/* No results */}
+              {analytics.noResults.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Unanswered Searches</p>
+                  <p className="text-[10px] text-gray-600 mb-2">These searches returned no results — potential FAQ gaps:</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {analytics.noResults.map((q, i) => (
+                      <span key={i} className="text-[10px] px-2.5 py-1 rounded-full bg-warn/5 border border-warn/15 text-warn/70">{q}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        );
+      })()}
 
       {/* Community top questions */}
       {stats.topCommunity && stats.topCommunity.length > 0 && (

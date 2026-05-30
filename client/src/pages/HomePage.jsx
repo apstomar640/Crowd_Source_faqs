@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { Search, ArrowRight, TrendingUp, Users, Zap, ChevronDown } from 'lucide-react';
-import { officialFAQs, sections, communityQuestions } from '../data/faqs.js';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Search, ArrowRight, TrendingUp, Users, Zap, ChevronDown, Sparkles, FileText } from 'lucide-react';
+import { officialFAQs, sections, categories, communityQuestions } from '../data/faqs.js';
+import { buildFAQIndex, searchFAQs, getSuggestions } from '../utils/nlp-search.js';
+import NocGenerator from '../components/NocGenerator.jsx';
+import { LeaderboardWidget } from '../components/Leaderboard.jsx';
 
 const stagger = {
   animate: { transition: { staggerChildren: 0.07 } },
@@ -17,18 +20,40 @@ export default function HomePage() {
   const [searchVal, setSearchVal] = useState(searchParams.get('q') || '');
   const [activeSection, setActiveSection] = useState('All');
   const [showPopup, setShowPopup] = useState(null); // 'ask' | 'insights' | null
+  const [showNoc, setShowNoc] = useState(false);
+
+  // Build NLP index on mount
+  useEffect(() => {
+    buildFAQIndex(officialFAQs.map(f => ({ ...f, source: 'official' })));
+  }, []);
 
   const handleSearch = (e) => {
     e.preventDefault();
     if (searchVal.trim()) setSearchParams({ q: searchVal.trim() });
   };
 
-  const filtered = officialFAQs.filter(faq => {
-    const q = searchParams.get('q') || '';
-    const matchQ = !q || faq.q.toLowerCase().includes(q.toLowerCase()) || faq.a.toLowerCase().includes(q.toLowerCase());
-    const matchCat = activeSection === 'All' || faq.category === activeSection;
-    return matchQ && matchCat;
-  });
+  // NLP-powered search with fallback to category filter
+  const queryStr = searchParams.get('q') || '';
+  const nlpResults = useMemo(() => {
+    if (!queryStr.trim()) return null;
+    return searchFAQs(queryStr, { topK: 127, category: activeSection });
+  }, [queryStr, activeSection]);
+
+  const suggestions = useMemo(() => {
+    if (!queryStr.trim()) return [];
+    return getSuggestions(queryStr);
+  }, [queryStr]);
+
+  const filtered = useMemo(() => {
+    // If there's a search query, use NLP results
+    if (nlpResults) {
+      return nlpResults.map(r => ({ ...r.faq, _nlpScore: r.score, _confidence: r.confidence }));
+    }
+    // Otherwise just filter by category
+    return officialFAQs.filter(faq => {
+      return activeSection === 'All' || faq.category === activeSection;
+    });
+  }, [nlpResults, activeSection]);
 
   const trendingFAQs = [...officialFAQs].sort((a, b) => b.votes - a.votes).slice(0, 5);
   const recentActivity = communityQuestions.slice(0, 3);
@@ -177,10 +202,10 @@ export default function HomePage() {
           <div className="lg:col-span-2 flex flex-col gap-6">
             {/* Section filter */}
             <motion.div variants={stagger} initial="initial" animate="animate" className="flex flex-wrap gap-2">
-              {['All', ...sections.map(s => s.split(' ')[0])].map(cat => (
+              {categories.map(cat => (
                 <button
                   key={cat}
-                  onClick={() => setActiveSection(cat === 'All' ? 'All' : cat)}
+                  onClick={() => setActiveSection(cat)}
                   className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all duration-200 cursor-pointer ${
                     activeSection === cat
                       ? 'bg-primary/10 border-primary/20 text-primary'
@@ -194,10 +219,54 @@ export default function HomePage() {
 
             {/* FAQ list */}
             <motion.div variants={stagger} initial="initial" animate="animate" className="flex flex-col gap-3">
+              {/* NLP Search feedback */}
+              {queryStr && (
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={13} className="text-secondary" />
+                    <span className="text-xs text-gray-400">
+                      {filtered.length} result{filtered.length !== 1 ? 's' : ''} for <span className="text-gray-200 font-semibold">"{queryStr}"</span>
+                    </span>
+                  </div>
+                  {queryStr && (
+                    <button
+                      onClick={() => { setSearchParams({}); setSearchVal(''); }}
+                      className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors cursor-pointer"
+                    >
+                      Clear search
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Did you mean? suggestions */}
+              {suggestions.length > 0 && filtered.length < 3 && (
+                <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-secondary/5 border border-secondary/15">
+                  <span className="text-[11px] text-gray-400">🔍 Did you mean:</span>
+                  {suggestions.map((s, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setSearchVal(s.suggested);
+                        setSearchParams({ q: s.suggested });
+                      }}
+                      className="text-[11px] text-secondary hover:text-secondary/80 font-semibold cursor-pointer underline underline-offset-2"
+                    >
+                      {s.suggested}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {filtered.length === 0 && (
                 <div className="text-center py-16 text-gray-500">
                   <p className="text-lg mb-2">No FAQs found</p>
-                  <p className="text-sm">Try a different search term or category</p>
+                  <p className="text-sm">Try rephrasing your question or use different keywords</p>
+                  {suggestions.length > 0 && (
+                    <p className="text-sm mt-2 text-secondary">
+                      Did you mean "{suggestions[0].suggested}"?
+                    </p>
+                  )}
                 </div>
               )}
               {filtered.map(faq => (
@@ -205,13 +274,26 @@ export default function HomePage() {
                   <Link to={`/faq/${faq.id}`} className="glass rounded-xl p-5 block hover:bg-white/[0.065] transition-all group">
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-2">
+                        <div className="flex items-center gap-2 mb-2 flex-wrap">
                           <span className="text-[10px] font-semibold uppercase tracking-wider text-primary/70 bg-primary/8 px-2 py-0.5 rounded-full">
                             {faq.category}
                           </span>
                           {faq.isOfficial && (
                             <span className="text-[10px] font-semibold uppercase tracking-wider text-accent/80 bg-accent/8 px-2 py-0.5 rounded-full">
                               ✓ Official
+                            </span>
+                          )}
+                          {faq._confidence && (
+                            <span
+                              className="text-[9px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1"
+                              style={{
+                                backgroundColor: `${faq._confidence.color}12`,
+                                color: faq._confidence.color,
+                                border: `1px solid ${faq._confidence.color}25`,
+                              }}
+                            >
+                              <Sparkles size={7} />
+                              {faq._confidence.label}
                             </span>
                           )}
                         </div>
@@ -239,6 +321,36 @@ export default function HomePage() {
 
           {/* Sidebar */}
           <div className="flex flex-col gap-6">
+            {/* NOC Generator Card */}
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}
+              className="glass rounded-xl p-5 bg-gradient-to-br from-primary/5 to-secondary/5 border border-primary/10"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+                  <FileText size={20} className="text-primary" />
+                </div>
+                <div>
+                  <h3 className="font-outfit font-bold text-sm text-gray-200">NOC Generator</h3>
+                  <p className="text-[10px] text-gray-500">Auto-generate your certificate</p>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 leading-relaxed mb-3">
+                Generate a printable No Objection Certificate for the Vicharanashala internship — fill in your details & print.
+              </p>
+              <button
+                onClick={() => setShowNoc(true)}
+                className="btn-primary w-full text-xs flex items-center justify-center gap-2"
+              >
+                <FileText size={13} />
+                Generate NOC →
+              </button>
+            </motion.div>
+
+            {/* Leaderboard */}
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.18 }}>
+              <LeaderboardWidget />
+            </motion.div>
+
             {/* Trending */}
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="glass rounded-xl p-5">
               <h3 className="font-outfit font-bold text-sm text-gray-200 mb-4 flex items-center gap-2">
@@ -291,6 +403,11 @@ export default function HomePage() {
           </div>
         </div>
       </section>
+
+      {/* NOC Generator Modal */}
+      <AnimatePresence>
+        {showNoc && <NocGenerator open={showNoc} onClose={() => setShowNoc(false)} />}
+      </AnimatePresence>
     </div>
   );
 }

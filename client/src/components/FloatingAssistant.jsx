@@ -1,175 +1,223 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, X, Send, ExternalLink, ChevronRight, ChevronDown, ChevronUp, Zap, Loader } from 'lucide-react';
+import {
+  Bot, X, Send, ExternalLink, ChevronRight, ChevronDown, ChevronUp,
+  Zap, Sparkles, Brain, Target, Copy, Check, ArrowRight, Search,
+  MessageSquare, RotateCcw, Hash, Lightbulb,
+} from 'lucide-react';
 import { officialFAQs } from '../data/faqs.js';
+import { buildFAQIndex, searchFAQs } from '../utils/nlp-search.js';
+import { generateResponse, ConversationMemory, classifyIntent } from '../utils/yaksha-brain.js';
+import { initAIEngine } from '../utils/ai-engine.js';
 
 const API = 'http://localhost:3001/api';
 
-// ─── Yaksha Brain ───────────────────────────────────────────────────────────
-// Intelligent FAQ matcher with keyword boost + question-type routing.
-// Sources: 28 official FAQs (static) + community Q&A from /api/community/faqs (live).
+// ─── Confidence Badge ─────────────────────────────────────────────────────
 
-const CATEGORY_KEYWORDS = {
-  noc:        ['noc', 'certificate', 'letter', 'sign', 'stamp', 'format', 'authorised', 'signatory', 'self', 'college', 'hod', 'sign'],
-  timing:     ['start', 'date', 'deadline', 'finish', 'begin', 'when', 'month', 'window', 'end date', 'exam', 'june', 'july', 'august', 'before'],
-  certificate:['certificate', 'completion', 'earn', 'result panel', 'selection', 'stipend', 'award', 'reward', 'selected', 'panel', 'offer letter'],
-  attendance: ['zoom', 'attendance', 'camera', 'session', 'live', 'poll', 'quizzes', 'recorded', 'recording', 'join', 'miss'],
-  work:       ['project', 'work', 'mentor', 'hours', 'laptop', 'commit', 'team', 'open-source', 'github', 'contribution', 'code'],
-  vina:       ['vins', 'vise', 'online', 'offline', 'programme', 'online programme', 'lab visit', 'in-person', 'residential', 'visit', 'in person'],
-  vibe:       ['vibe', 'lms', 'video', 'login', 'course', 'invite', 'flag', 'browser', 'quiet helper', 'progress'],
-  rosetta:    ['rosetta', 'journal', 'daily', 'reflect', 'thinking', 'ai tools', 'chatgpt', 'reflection', 'writing', 'mandatory'],
-  about:      ['vins', 'vicharanashala', 'about', 'who', 'eligible', 'student', 'iit', 'sumership', 'internship', 'program', 'difference'],
-  team:       ['team', 'partner', 'group', 'mate', 'collaborate'],
-};
-
-// Question-type classifiers
-const QUESTION_TYPE_PATTERNS = [
-  { type: 'can_i',   patterns: [/can i/i, /can we/i, /is it possible/i, /able to/i] },
-  { type: 'how',     patterns: [/how (do|does|can|to|long)/i, /what (is|are) the/i] },
-  { type: 'when',    patterns: [/when/i, /timeline/i, /duration/i, /schedule/i] },
-  { type: 'what',    patterns: [/what/i, /which/i] },
-  { type: 'why',     patterns: [/why/i] },
-  { type: 'should',  patterns: [/should i/i, /should we/i, /advice/i, /recommend/i] },
-  { type: 'cost',    patterns: [/cost/i, /pay/i, /fee/i, /charge/i, /stipend/i, /money/i, /paid/i, /free/i] },
-  { type: 'eligible',patterns: [/eligible/i, /eligibility/i, /who can/i, /any one/i, /can join/i] },
-];
-
-function normalise(str) {
-  return (str || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ');
+function ConfidenceBadge({ confidence }) {
+  if (!confidence) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full"
+      style={{
+        backgroundColor: `${confidence.color}15`,
+        color: confidence.color,
+        border: `1px solid ${confidence.color}30`,
+      }}
+    >
+      <Target size={7} />
+      {confidence.label}
+    </span>
+  );
 }
 
-function classifyQuestionType(q) {
-  for (const { type, patterns } of QUESTION_TYPE_PATTERNS) {
-    for (const p of patterns) {
-      if (p.test(q)) return type;
+// ─── Copy Button ──────────────────────────────────────────────────────────
+
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* fallback: do nothing */ }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="text-gray-600 hover:text-gray-300 transition-colors cursor-pointer p-0.5"
+      title="Copy answer"
+    >
+      {copied ? <Check size={10} className="text-accent" /> : <Copy size={10} />}
+    </button>
+  );
+}
+
+// ─── Typing Animation ────────────────────────────────────────────────────
+
+function TypewriterText({ text, speed = 8, onComplete }) {
+  const [displayed, setDisplayed] = useState('');
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (!text) return;
+    let i = 0;
+    setDisplayed('');
+    setDone(false);
+
+    const interval = setInterval(() => {
+      i++;
+      // Type in chunks of 2-4 chars for faster rendering
+      const chunk = Math.min(i * 3, text.length);
+      setDisplayed(text.slice(0, chunk));
+      if (chunk >= text.length) {
+        clearInterval(interval);
+        setDone(true);
+        onComplete?.();
+      }
+    }, speed);
+
+    return () => clearInterval(interval);
+  }, [text]);
+
+  return (
+    <>
+      {renderMessageText(displayed)}
+      {!done && <span className="inline-block w-1.5 h-3 bg-primary/60 animate-pulse ml-0.5 rounded-sm" />}
+    </>
+  );
+}
+
+// ─── Message Text Renderer ────────────────────────────────────────────────
+
+function renderMessageText(text) {
+  if (!text) return null;
+  return text.split('\n').map((line, li) => {
+    if (line.startsWith('Also relevant:')) {
+      const rest = line.replace(/^Also\s*relevant:\s*/, '');
+      return (
+        <p key={li} className="mt-2 pt-2 border-t border-white/[0.07] text-gray-400 text-[11px]">
+          💡 {rest}
+        </p>
+      );
     }
-  }
-  return 'general';
-}
-
-// Score how well a FAQ matches the query
-function scoreFAQ(query, faq) {
-  const q       = normalise(query);
-  const faqQ    = normalise(faq.q || faq.title || '');
-  const faqA    = normalise(faq.a || faq.description || faq.content || '');
-
-  let score = 0;
-
-  // ── Exact / near-exact phrase matches (highest weight) ──
-  // Query appears whole inside FAQ question → very likely match
-  if (faqQ.includes(q))                          return 200;
-  if (faqA.includes(q))                          return 150;
-
-  // Query words as prefix in FAQ question
-  const qWords = q.split(/\s+/).filter(w => w.length >= 3);
-  const faqQWords = faqQ.split(/\s+/);
-
-  // Count how many query words appear in the FAQ
-  let matchedWords = 0;
-  let unmatchedQWords = [];
-  for (const w of qWords) {
-    if (faqQWords.includes(w) || faqA.split(/\s+/).includes(w)) {
-      matchedWords++;
-    } else {
-      unmatchedQWords.push(w);
+    if (line.startsWith('Did you mean')) {
+      return (
+        <p key={li} className="mt-1 text-secondary text-[11px] italic">
+          🔍 {line}
+        </p>
+      );
     }
-  }
-
-  // Partial phrase prefix match
-  if (faqQ.includes(q.slice(0, Math.floor(q.length * 0.65)))) score += 60;
-
-  // Word overlap score (3pts per matched word)
-  score += matchedWords * 3;
-
-  // ── Category keyword boost ──
-  let bestCatBoost = 0;
-  for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
-    const qK  = keywords.filter(k => q.includes(k)).length;
-    const fK  = (faqQ + ' ' + faqA).split(/\s+/).filter(w => keywords.includes(w)).length;
-    if (qK > 0 && fK > 0) {
-      bestCatBoost = Math.max(bestCatBoost, qK * fK * 8);
+    if (line.startsWith('I found something that might')) {
+      return (
+        <p key={li} className="text-gray-400 text-[11px] italic mb-2">
+          ⚠️ {line}
+        </p>
+      );
     }
-  }
-  score += bestCatBoost;
-
-  // ── Question-type alignment bonus ──
-  const queryType = classifyQuestionType(q);
-  const faqType   = classifyQuestionType(faqQ);
-  if (queryType === faqType && queryType !== 'general') score += 20;
-
-  // ── Penalty for FAQ answer being too short (low-info) ──
-  const ansLen = (faq.a || faq.description || '').length;
-  if (ansLen < 50)  score -= 5;
-  if (ansLen < 20)  score -= 10;
-
-  // ── Preference: FAQs with higher votes ──
-  score += Math.log((faq.votes || 0) + 1) * 0.5;
-
-  return score;
+    // Bold text with **
+    const boldParsed = line.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    if (boldParsed !== line) {
+      return line.trim() ? (
+        <p key={li} className={li > 0 ? 'mt-2' : ''} dangerouslySetInnerHTML={{ __html: boldParsed }} />
+      ) : null;
+    }
+    // Numbered lists
+    if (/^\d+[\.\)]\s/.test(line.trim())) {
+      return (
+        <p key={li} className={`${li > 0 ? 'mt-1' : ''} pl-2 text-gray-300`}>
+          {line.trim()}
+        </p>
+      );
+    }
+    return line.trim() ? <p key={li} className={li > 0 ? 'mt-2' : ''}>{line}</p> : null;
+  });
 }
 
-function findBestFAQs(query, allFAQs, count = 3) {
-  const scored = allFAQs
-    .map(faq => ({ faq, score: scoreFAQ(query, faq) }))
-    .filter(s => s.score > 0)
-    .sort((a, b) => b.score - a.score);
+// ─── Related Questions Component ──────────────────────────────────────────
 
-  return scored.slice(0, count).map(s => s.faq);
+function RelatedQuestions({ questions, onQuestionClick }) {
+  if (!questions || questions.length === 0) return null;
+
+  return (
+    <div className="mt-2.5">
+      <p className="text-[9px] text-gray-600 font-semibold uppercase tracking-wider mb-1.5 flex items-center gap-1">
+        <Lightbulb size={8} />
+        Related questions
+      </p>
+      <div className="flex flex-col gap-1">
+        {questions.map((q) => (
+          <button
+            key={q.id}
+            onClick={() => onQuestionClick(q.text)}
+            className="text-left text-[10px] px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.05] text-gray-400 hover:text-primary hover:border-primary/20 hover:bg-primary/5 transition-all cursor-pointer flex items-center gap-2 group"
+          >
+            <ArrowRight size={8} className="text-gray-600 group-hover:text-primary transition-colors flex-shrink-0" />
+            <span className="flex-1 truncate">{q.text}</span>
+            <span className="text-[8px] text-gray-600 bg-white/[0.04] px-1.5 py-0.5 rounded-full flex-shrink-0">
+              {q.category}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
-function buildAnswer(query, faqs) {
-  if (!faqs.length) {
-    // Show a helpful redirect
-    return {
-      text: `I couldn't find an exact match for "${query}". Try asking on the Community page — your question might already be answered there, or someone from the team will reply.`,
-      faqs: [],
-      redirect: '/community',
-    };
-  }
+// ─── Quick Action Chips ───────────────────────────────────────────────────
 
-  const primary = faqs[0];
-  let text = primary.a || primary.description || primary.content || '';
+function QuickActions({ actions, onActionClick }) {
+  if (!actions || actions.length === 0) return null;
 
-  if (faqs.length > 1) {
-    const sec    = faqs[1];
-    const secTxt = sec.a || sec.description || sec.content || '';
-    const preview = secTxt.length > 120 ? secTxt.slice(0, 117) + '…' : secTxt;
-    text += `\n\nAlso relevant: "${sec.q || sec.title}" — ${preview}`;
-  }
-
-  return { text, faqs };
+  return (
+    <div className="mt-2.5 flex flex-wrap gap-1.5">
+      {actions.map((action, i) => (
+        <button
+          key={i}
+          onClick={() => onActionClick(action.query)}
+          className="text-[10px] px-2.5 py-1.5 rounded-full bg-primary/5 border border-primary/15 text-primary/80 hover:text-primary hover:border-primary/30 hover:bg-primary/10 transition-all cursor-pointer"
+        >
+          {action.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
-// Quick-preset buttons — cover every major topic with signal-rich questions
+// ─── Preset Quick Questions ───────────────────────────────────────────────
+
 const PRESETS = [
-  { q: 'How do I get my NOC signed?',                           keywords: ['noc', 'sign'] },
-  { q: 'What if I miss a Zoom session?',                         keywords: ['zoom', 'miss'] },
-  { q: 'When will I get my certificate?',                        keywords: ['certificate', 'when'] },
-  { q: 'Can I start later if I have exams?',                     keywords: ['start', 'exam', 'later'] },
-  { q: 'Who is my mentor and how are they assigned?',            keywords: ['mentor', 'assigned'] },
-  { q: 'Is there a stipend or do I get paid?',                   keywords: ['stipend', 'pay'] },
-  { q: 'What is Rosetta and is it mandatory?',                   keywords: ['rosetta', 'mandatory'] },
-  { q: 'How do I log into ViBe? The invite link is not working', keywords: ['vibe', 'login', 'invite'] },
-  { q: 'What is the difference between VINS and VISE?',          keywords: ['vins', 'vise', 'offline'] },
-  { q: 'Am I eligible if I have already graduated?',             keywords: ['eligible', 'alumni', 'graduate'] },
+  { q: 'How do I get my NOC signed?',                icon: '📋' },
+  { q: 'What if I miss a Zoom session?',             icon: '📹' },
+  { q: 'When will I get my certificate?',            icon: '🎓' },
+  { q: 'Can I start later if I have exams?',         icon: '📅' },
+  { q: 'Who is my mentor?',                          icon: '👨‍🏫' },
+  { q: 'Is there a stipend?',                        icon: '💰' },
+  { q: 'What is Rosetta?',                           icon: '📓' },
+  { q: 'How do I log into ViBe?',                    icon: '🔗' },
+  { q: 'What is the team size?',                     icon: '👥' },
+  { q: 'Can I use WhatsApp groups?',                 icon: '📱' },
 ];
 
-const WELCOME = {
-  from: 'ai',
-  text: "Namaste! I'm Yaksha. I know all the official FAQs — and I also learn from every question the community asks. Ask me anything about Vicharanashala!",
-};
-
-// ─── Component ───────────────────────────────────────────────────────────────
+// ─── Main Component ───────────────────────────────────────────────────────
 
 export default function FloatingAssistant() {
-  const [open, setOpen]               = useState(false);
-  const [messages, setMessages]       = useState([WELCOME]);
-  const [input, setInput]             = useState('');
-  const [visible, setVisible]         = useState(true);
-  const [communityFAQs, setCommunityFAQs] = useState([]);
-  const [presetExpanded, setPresetExpanded] = useState(false);
-  const [thinking, setThinking]       = useState(false);
+  const [open, setOpen]                     = useState(false);
+  const [messages, setMessages]             = useState([]);
+  const [input, setInput]                   = useState('');
+  const [visible, setVisible]               = useState(true);
+  const [communityFAQs, setCommunityFAQs]   = useState([]);
+  const [presetExpanded, setPresetExpanded]  = useState(false);
+  const [thinking, setThinking]             = useState(false);
+  const [indexReady, setIndexReady]          = useState(false);
+  const [typingId, setTypingId]             = useState(null);
+  const messagesEndRef                      = useRef(null);
+  const memoryRef                           = useRef(new ConversationMemory());
 
+  // Fetch community FAQs
   useEffect(() => {
     if (!open) return;
     fetch(`${API}/community/faqs`)
@@ -178,49 +226,122 @@ export default function FloatingAssistant() {
       .catch(() => {});
   }, [open]);
 
-  const allFAQs = [
+  // Build NLP index
+  const allFAQs = useMemo(() => [
     ...officialFAQs.map(f => ({ ...f, source: 'official' })),
     ...communityFAQs.map(f => ({ ...f, source: 'community' })),
-  ];
+  ], [communityFAQs]);
 
-  const handleSend = (text) => {
+  useEffect(() => {
+    if (allFAQs.length > 0) {
+      buildFAQIndex(allFAQs);
+      // Initialize Semantic AI model in the background
+      initAIEngine(allFAQs, (progress) => {
+        // Optional: can show progress in UI if needed, for now just load
+      }).catch(console.error);
+      setIndexReady(true);
+    }
+  }, [allFAQs]);
+
+  // Initialize: restore session or show welcome
+  useEffect(() => {
+    const memory = memoryRef.current;
+    const hasSession = memory.restore();
+
+    if (hasSession) {
+      // Rebuild messages from memory
+      const restored = memory.history.map((h, i) => ({
+        id: `restored-${i}`,
+        from: h.role === 'user' ? 'user' : 'ai',
+        text: h.text,
+        matchedFAQ: h.matchedFaq || null,
+        isRestored: true,
+      }));
+      setMessages(restored);
+    } else {
+      setMessages([{
+        id: 'welcome',
+        from: 'ai',
+        text: "Namaste! 🙏 I'm Yaksha — powered by a RAG engine that understands your questions naturally. I have 127 official FAQs and I learn from every community question.\n\nAsk me anything, or try a quick command like /noc, /timing, /team!",
+        isWelcome: true,
+        quickActions: [
+          { label: '📋 NOC Help', query: '/noc' },
+          { label: '⏰ Timing', query: '/timing' },
+          { label: '🎓 Certificate', query: '/certificate' },
+          { label: '👥 Teams', query: '/team' },
+          { label: '📺 ViBe', query: '/vibe' },
+          { label: '📓 Rosetta', query: '/rosetta' },
+        ],
+      }]);
+    }
+  }, []);
+
+  // Auto-scroll
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, thinking]);
+
+  // ── Send Message Handler ──
+  const handleSend = useCallback((text) => {
     const userText = (text || input).trim();
-    if (!userText) return;
+    if (!userText || !indexReady) return;
 
-    setMessages(m => [...m, { from: 'user', text: userText }]);
+    const msgId = Date.now().toString(36);
+
+    setMessages(m => [...m, { id: `user-${msgId}`, from: 'user', text: userText }]);
     setInput('');
     setThinking(true);
 
-    setTimeout(() => {
-      const matched   = findBestFAQs(userText, allFAQs);
-      const { text: answer, faqs, redirect } = buildAnswer(userText, matched);
+    // Simulate thinking delay (shorter for conversational intents)
+    const { intent } = classifyIntent(userText);
+    const delay = intent === 'faq_query' ? 600 + Math.random() * 500 : 300 + Math.random() * 300;
+
+    setTimeout(async () => {
+      const response = await generateResponse(userText, memoryRef.current);
+      const aiMsgId = `ai-${msgId}`;
 
       setThinking(false);
-      setMessages(m => [
-        ...m,
-        { from: 'ai', text: answer, faqs, matchedFAQ: matched[0] || null, redirect },
-      ]);
-    }, 900);
-  };
+      setTypingId(aiMsgId); // Enable typewriter effect
 
-  const handlePresetClick = (preset) => {
-    setMessages(m => [...m, { from: 'user', text: preset.q }]);
-    setThinking(true);
-    setTimeout(() => {
-      const matched   = findBestFAQs(preset.q, allFAQs);
-      const { text: answer, faqs, redirect } = buildAnswer(preset.q, matched);
-      setThinking(false);
       setMessages(m => [
         ...m,
-        { from: 'ai', text: answer, faqs, matchedFAQ: matched[0] || null, redirect },
+        {
+          id: aiMsgId,
+          from: 'ai',
+          text: response.text,
+          faqs: response.faqs,
+          matchedFAQ: response.matchedFAQ || null,
+          confidence: response.confidence,
+          redirect: response.redirect,
+          results: response.results,
+          relatedQuestions: response.relatedQuestions,
+          quickActions: response.quickActions,
+          intent: response.intent,
+          suggestions: response.suggestions,
+        },
       ]);
-    }, 900);
+    }, delay);
+  }, [input, indexReady]);
+
+  // ── Clear Chat ──
+  const handleClear = () => {
+    memoryRef.current.clear();
+    setMessages([{
+      id: 'welcome-new',
+      from: 'ai',
+      text: "Chat cleared! 🔄 I'm ready for new questions. What would you like to know?",
+      quickActions: [
+        { label: '📋 NOC', query: '/noc' },
+        { label: '⏰ Timing', query: '/timing' },
+        { label: '🎓 Certificate', query: '/certificate' },
+        { label: '👥 Teams', query: '/team' },
+      ],
+    }]);
   };
 
   const displayedPresets = presetExpanded ? PRESETS : PRESETS.slice(0, 5);
 
-  const lastMsg = messages[messages.length - 1];
-
+  // ── Render ──
   return (
     <AnimatePresence>
       {!visible ? (
@@ -251,9 +372,9 @@ export default function FloatingAssistant() {
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: 20, scale: 0.95 }}
           transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-          className="fixed bottom-6 right-6 z-[60] w-[22rem] sm:w-[26rem] bg-elevated border border-white/[0.1] rounded-2xl shadow-[0_8px_60px_rgba(0,0,0,0.7)] flex flex-col overflow-hidden max-h-[38rem]"
+          className="fixed bottom-6 right-6 z-[60] w-[22rem] sm:w-[26rem] bg-elevated border border-white/[0.1] rounded-2xl shadow-[0_8px_60px_rgba(0,0,0,0.7)] flex flex-col overflow-hidden max-h-[40rem]"
         >
-          {/* Header */}
+          {/* ── Header ── */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06] bg-surface/90 flex-shrink-0">
             <div className="flex items-center gap-2.5">
               <div className="relative">
@@ -263,78 +384,127 @@ export default function FloatingAssistant() {
                 <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-accent rounded-full border-2 border-elevated animate-pulse" />
               </div>
               <div>
-                <p className="text-xs font-bold text-gray-200">Yaksha Assistant</p>
+                <p className="text-xs font-bold text-gray-200 flex items-center gap-1.5">
+                  Yaksha
+                  <span className="inline-flex items-center gap-0.5 text-[8px] font-semibold px-1.5 py-0.5 rounded-full bg-secondary/15 text-secondary border border-secondary/20">
+                    <Brain size={7} />
+                    RAG
+                  </span>
+                </p>
                 <p className="text-[10px] text-gray-500">
-                  {officialFAQs.length} official
-                  {communityFAQs.length > 0 && ` · ${communityFAQs.length} community`}
+                  {allFAQs.length} FAQs · BM25 + NLP
+                  {indexReady && ' · Ready'}
                 </p>
               </div>
             </div>
-            <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-white p-1 transition-colors cursor-pointer">
-              <ChevronRight size={16} />
-            </button>
+            <div className="flex items-center gap-1">
+              <button onClick={handleClear} className="text-gray-600 hover:text-gray-300 p-1 transition-colors cursor-pointer" title="Clear chat">
+                <RotateCcw size={13} />
+              </button>
+              <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-white p-1 transition-colors cursor-pointer">
+                <ChevronRight size={16} />
+              </button>
+            </div>
           </div>
 
-          {/* Messages */}
+          {/* ── Messages ── */}
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 no-scrollbar">
-            {messages.map((m, i) => (
+            {messages.map((m) => (
               <motion.div
-                key={i}
-                initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                key={m.id}
+                initial={m.isRestored ? false : { opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.2 }}
                 className={`flex ${m.from === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 <div className="max-w-[88%]">
+                  {/* AI header */}
                   {m.from === 'ai' && (
                     <div className="flex items-center gap-1.5 mb-1.5">
                       <div className="w-4 h-4 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center">
                         <Bot size={9} className="text-black" />
                       </div>
                       <span className="text-[10px] text-gray-600 font-medium">Yaksha</span>
+                      {m.confidence && <ConfidenceBadge confidence={m.confidence} />}
                     </div>
                   )}
 
+                  {/* Message bubble */}
                   <div className={`rounded-2xl px-4 py-3 text-xs leading-relaxed ${
                     m.from === 'user'
                       ? 'bg-primary text-black font-semibold rounded-br-md'
                       : 'bg-white/[0.06] text-gray-200 border border-white/[0.07] rounded-bl-md'
                   }`}>
-                    {m.text.split('\n').map((line, li) => {
-                      if (line.startsWith('Also see:') || line.startsWith('Also relevant:')) {
-                        const rest = line.replace(/^(Also (see|relevant):)\\s*/, '');
-                        return (
-                          <p key={li} className="mt-2 pt-2 border-t border-white/[0.07] text-gray-400 text-[11px]">
-                            💡 {rest}
-                          </p>
-                        );
-                      }
-                      return line.trim() ? <p key={li} className={li > 0 ? 'mt-2' : ''}>{line}</p> : null;
-                    })}
+                    {m.from === 'ai' && typingId === m.id && !m.isRestored
+                      ? <TypewriterText text={m.text} speed={8} onComplete={() => setTypingId(null)} />
+                      : renderMessageText(m.text)
+                    }
                   </div>
+
+                  {/* Copy button for AI messages */}
+                  {m.from === 'ai' && m.text && !m.isWelcome && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <CopyButton text={m.text} />
+                      {m.matchedFAQ && (
+                        <a
+                          href={`/faq/${m.matchedFAQ.id}`}
+                          className="text-[9px] text-gray-600 hover:text-primary transition-colors flex items-center gap-0.5"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ExternalLink size={8} />
+                          View full FAQ
+                        </a>
+                      )}
+                    </div>
+                  )}
 
                   {/* Source badge */}
                   {m.from === 'ai' && m.matchedFAQ && (
                     <div className="mt-2 flex items-start gap-2 px-3 py-2 rounded-xl bg-primary/[0.06] border border-primary/12 group">
                       <div className="flex-1 min-w-0">
                         <p className="text-[10px] text-primary font-semibold uppercase tracking-wider mb-0.5">
-                          {m.matchedFAQ.source === 'community' ? '🌐 Community Answer' : '✅ Official FAQ'}
+                          {m.matchedFAQ.source === 'community' ? '🌐 Community' : '✅ Official FAQ'}
                           {m.matchedFAQ.section && ` · ${m.matchedFAQ.section}`}
                         </p>
                         <p className="text-[11px] text-gray-300 leading-snug group-hover:text-primary transition-colors">
                           {m.matchedFAQ.q || m.matchedFAQ.title}
                         </p>
-                        {m.matchedFAQ.votes !== undefined && (
-                          <p className="text-[9px] text-gray-600 mt-1">
-                            ▲ {m.matchedFAQ.votes} votes
-                            {m.matchedFAQ.answer_count !== undefined && ` · ${m.matchedFAQ.answer_count} answers`}
-                          </p>
-                        )}
                       </div>
                     </div>
                   )}
 
-                  {/* Redirect nudge */}
+                  {/* Additional results */}
+                  {m.from === 'ai' && m.results && m.results.length > 1 && (
+                    <div className="mt-1.5 space-y-1">
+                      {m.results.slice(1, 3).map((r, ri) => (
+                        <div key={ri} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.05] group">
+                          <Sparkles size={8} className="text-gray-600 flex-shrink-0" />
+                          <p className="text-[10px] text-gray-500 group-hover:text-gray-300 transition-colors truncate flex-1">
+                            {r.faq.q || r.faq.title}
+                          </p>
+                          <ConfidenceBadge confidence={r.confidence} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Related questions (clickable) */}
+                  {m.from === 'ai' && (
+                    <RelatedQuestions
+                      questions={m.relatedQuestions}
+                      onQuestionClick={(q) => handleSend(q)}
+                    />
+                  )}
+
+                  {/* Quick action chips */}
+                  {m.from === 'ai' && (
+                    <QuickActions
+                      actions={m.quickActions}
+                      onActionClick={(q) => handleSend(q)}
+                    />
+                  )}
+
+                  {/* Redirect */}
                   {m.from === 'ai' && m.redirect && (
                     <a
                       href={m.redirect}
@@ -350,30 +520,31 @@ export default function FloatingAssistant() {
 
             {/* Thinking indicator */}
             {thinking && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex justify-start"
-              >
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
                 <div className="bg-white/[0.04] border border-white/[0.07] rounded-2xl rounded-bl-md px-4 py-3 flex items-center gap-2">
-                  <Loader size={11} className="text-gray-500 animate-spin" />
-                  <span className="text-xs text-gray-500">Thinking…</span>
+                  <div className="flex gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </div>
+                  <span className="text-xs text-gray-500">Searching with RAG…</span>
                 </div>
               </motion.div>
             )}
+            <div ref={messagesEndRef} />
           </div>
 
-          {/* Presets */}
+          {/* ── Presets ── */}
           <div className="px-3 pb-2 flex-shrink-0 border-t border-white/[0.04] pt-2">
             <div className="flex flex-wrap gap-1.5">
               {displayedPresets.map(p => (
                 <button
                   key={p.q}
-                  onClick={() => handlePresetClick(p)}
+                  onClick={() => handleSend(p.q)}
                   className="text-[10px] px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.07] text-gray-500 hover:text-gray-200 hover:border-primary/20 hover:bg-primary/5 transition-all cursor-pointer flex items-center gap-1"
                 >
-                  <Zap size={8} className="text-primary/60 flex-shrink-0" />
-                  <span className="truncate max-w-[11rem]">{p.q.length > 36 ? p.q.slice(0, 34) + '…' : p.q}</span>
+                  <span className="flex-shrink-0">{p.icon}</span>
+                  <span className="truncate max-w-[11rem]">{p.q.length > 32 ? p.q.slice(0, 30) + '…' : p.q}</span>
                 </button>
               ))}
               {PRESETS.length > 5 && (
@@ -388,18 +559,19 @@ export default function FloatingAssistant() {
             </div>
           </div>
 
-          {/* Input */}
+          {/* ── Input ── */}
           <div className="px-3 pb-3 pt-1 flex gap-2 flex-shrink-0">
             <input
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleSend()}
-              placeholder="Ask about Vicharanashala…"
+              placeholder="Ask anything or try /noc, /team…"
               className="flex-1 bg-white/[0.04] border border-white/[0.07] rounded-full px-4 py-2 text-xs text-gray-200 placeholder-gray-600 outline-none focus:border-primary/30 transition-all"
             />
             <button
               onClick={() => handleSend()}
-              className="w-8 h-8 rounded-full bg-primary flex items-center justify-center hover:brightness-110 transition-all cursor-pointer flex-shrink-0"
+              disabled={!indexReady}
+              className="w-8 h-8 rounded-full bg-primary flex items-center justify-center hover:brightness-110 transition-all cursor-pointer flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Send size={13} className="text-black" />
             </button>

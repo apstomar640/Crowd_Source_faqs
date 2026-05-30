@@ -10,17 +10,18 @@ const router = Router();
 // ── AUTH ─────────────────────────────────────────────────────────────────────
 
 router.post('/auth/register', async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, role = 'intern', is_verified = 0 } = req.body;
   if (!name || !email || !password) return res.status(400).json({ error: 'Name, email, and password are required' });
   const existing = queryOne('SELECT id FROM users WHERE email = ?', [email]);
   if (existing) return res.status(409).json({ error: 'Email already registered' });
 
   const hash = await bcrypt.hash(password, 10);
   const id = uuidv4();
-  run('INSERT INTO users (id, name, email, password_hash) VALUES (?, ?, ?, ?)', [id, name, email, hash]);
+  run('INSERT INTO users (id, name, email, password_hash, role, is_verified) VALUES (?, ?, ?, ?, ?, ?)', 
+    [id, name, email, hash, role, is_verified]);
 
-  const token = jwt.sign({ id, name, email }, JWT_SECRET, { expiresIn: '7d' });
-  res.status(201).json({ user: { id, name, email, reputation: 0 }, token });
+  const token = jwt.sign({ id, name, email, role, is_verified }, JWT_SECRET, { expiresIn: '7d' });
+  res.status(201).json({ user: { id, name, email, role, is_verified, reputation: 0 }, token });
 });
 
 router.post('/auth/login', async (req, res) => {
@@ -29,12 +30,12 @@ router.post('/auth/login', async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-  const token = jwt.sign({ id: user.id, name: user.name, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ user: { id: user.id, name: user.name, email: user.email, reputation: user.reputation }, token });
+  const token = jwt.sign({ id: user.id, name: user.name, email: user.email, role: user.role, is_verified: user.is_verified }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ user: { id: user.id, name: user.name, email: user.email, role: user.role, is_verified: user.is_verified, reputation: user.reputation }, token });
 });
 
 router.get('/auth/me', authenticate, (req, res) => {
-  const user = queryOne('SELECT id, name, email, reputation, created_at FROM users WHERE id = ?', [req.user.id]);
+  const user = queryOne('SELECT id, name, email, role, is_verified, reputation, created_at FROM users WHERE id = ?', [req.user.id]);
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ user });
 });
@@ -87,8 +88,8 @@ router.post('/community/questions', async (req, res) => {
     const hash = await bcrypt.hash('anonymous-no-login', 10);
     const { v4: uuidv4 } = await import('uuid');
     const id = uuidv4();
-    run('INSERT INTO users (id, name, email, password_hash, reputation) VALUES (?, ?, ?, ?, ?)',
-      [id, 'Anonymous', 'anonymous@crowd.faq', hash, 0]);
+    run('INSERT INTO users (id, name, email, password_hash, role, is_verified, reputation) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, 'Anonymous', 'anonymous@crowd.faq', hash, 'intern', 1, 0]);
     anonUser = { id };
   }
 
@@ -96,6 +97,9 @@ router.post('/community/questions', async (req, res) => {
   const id = uuidv4();
   run('INSERT INTO questions (id, user_id, title, description, category, tags) VALUES (?, ?, ?, ?, ?, ?)',
     [id, anonUser.id, title, description, category, '[]']);
+
+  // Award SP for asking
+  run('UPDATE users SET reputation = reputation + 5 WHERE id = ?', [anonUser.id]);
 
   const question = queryOne('SELECT * FROM questions WHERE id = ?', [id]);
   res.status(201).json({ question: { ...question, answer_count: 0, upvotes: 0, downvotes: 0, score: 0 } });
@@ -134,8 +138,8 @@ router.post('/community/questions/:id/answers', async (req, res) => {
     const hash = await bcrypt.hash('anonymous-no-login', 10);
     const { v4: uuidv4 } = await import('uuid');
     const id = uuidv4();
-    run('INSERT INTO users (id, name, email, password_hash, reputation) VALUES (?, ?, ?, ?, ?)',
-      [id, 'Anonymous', 'anonymous@crowd.faq', hash, 0]);
+    run('INSERT INTO users (id, name, email, password_hash, role, is_verified, reputation) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, 'Anonymous', 'anonymous@crowd.faq', hash, 'intern', 1, 0]);
     anonUser = { id };
   }
 
@@ -143,6 +147,9 @@ router.post('/community/questions/:id/answers', async (req, res) => {
   const id = uuidv4();
   run('INSERT INTO answers (id, question_id, user_id, content) VALUES (?, ?, ?, ?)',
     [id, req.params.id, anonUser.id, content]);
+
+  // Award SP for answering
+  run('UPDATE users SET reputation = reputation + 10 WHERE id = ?', [anonUser.id]);
 
   const answer = queryOne('SELECT a.*, u.name as author_name FROM answers a JOIN users u ON a.user_id = u.id WHERE a.id = ?', [id]);
   res.status(201).json({ answer: { ...answer, upvotes: 0, downvotes: 0, score: 0, isOfficial: !!isOfficial } });
@@ -162,6 +169,19 @@ router.post('/community/questions/:questionId/vote', (req, res) => {
 
   const ups = queryOne('SELECT COUNT(*) as c FROM votes WHERE target_type=? AND target_id=? AND direction=?', [targetType, req.params.questionId, 'up'])?.c || 0;
   const downs = queryOne('SELECT COUNT(*) as c FROM votes WHERE target_type=? AND target_id=? AND direction=?', [targetType, req.params.questionId, 'down'])?.c || 0;
+
+  // Auto-promote check
+  const qData = queryOne(`
+    SELECT q.id, COALESCE(v_up.c, 0) as upvotes, COALESCE(a_cnt.c, 0) as answers
+    FROM questions q
+    LEFT JOIN (SELECT target_id, COUNT(*) as c FROM votes WHERE target_type='question' AND direction='up' GROUP BY target_id) v_up ON q.id = v_up.target_id
+    LEFT JOIN (SELECT question_id, COUNT(*) as c FROM answers GROUP BY question_id) a_cnt ON q.id = a_cnt.question_id
+    WHERE q.id = ? AND q.is_faq = 0
+  `, [req.params.questionId]);
+
+  if (qData && qData.upvotes >= 10 && qData.answers > 0) {
+    run('UPDATE questions SET is_faq = 1, promoted_at = datetime(\'now\') WHERE id = ?', [req.params.questionId]);
+  }
 
   res.json({ upvotes: ups, downvotes: downs, score: ups - downs });
 });
@@ -447,6 +467,82 @@ router.get('/community/faqs', (req, res) => {
   });
 
   res.json({ faqs: result });
+});
+
+// ── FAQ PROMOTION ──────────────────────────────────────────────────────────────
+
+router.post('/community/questions/:id/promote', (req, res) => {
+  const question = queryOne('SELECT * FROM questions WHERE id = ?', [req.params.id]);
+  if (!question) return res.status(404).json({ error: 'Question not found' });
+
+  // Check score >= 10 and at least 1 answer
+  const upvotes = queryOne('SELECT COUNT(*) as c FROM votes WHERE target_type=? AND target_id=? AND direction=?', ['question', req.params.id, 'up'])?.c || 0;
+  const downvotes = queryOne('SELECT COUNT(*) as c FROM votes WHERE target_type=? AND target_id=? AND direction=?', ['question', req.params.id, 'down'])?.c || 0;
+  const score = upvotes - downvotes;
+  const answerCount = queryOne('SELECT COUNT(*) as c FROM answers WHERE question_id = ?', [req.params.id])?.c || 0;
+
+  if (score < 10) return res.status(400).json({ error: 'Question must have a score of at least 10 to be promoted' });
+  if (answerCount < 1) return res.status(400).json({ error: 'Question must have at least 1 answer to be promoted' });
+
+  run('UPDATE questions SET is_faq = 1, promoted_at = datetime(\'now\') WHERE id = ?', [req.params.id]);
+
+  const updated = queryOne('SELECT * FROM questions WHERE id = ?', [req.params.id]);
+  res.json({ question: { ...updated, score, upvotes, downvotes, answer_count: answerCount } });
+});
+
+router.get('/community/promoted', (req, res) => {
+  const questions = queryAll(`
+    SELECT q.*,
+           COALESCE(a_count.answer_count, 0) as answer_count,
+           COALESCE(v.upvotes, 0) as upvotes,
+           COALESCE(v.downvotes, 0) as downvotes
+    FROM questions q
+    LEFT JOIN (SELECT question_id, COUNT(*) as answer_count FROM answers GROUP BY question_id) a_count ON q.id = a_count.question_id
+    LEFT JOIN (
+      SELECT target_id,
+             SUM(CASE WHEN direction = 'up'   THEN 1 ELSE 0 END) as upvotes,
+             SUM(CASE WHEN direction = 'down' THEN 1 ELSE 0 END) as downvotes
+      FROM votes WHERE target_type = 'question' GROUP BY target_id
+    ) v ON q.id = v.target_id
+    WHERE q.is_faq = 1
+    ORDER BY q.promoted_at DESC
+  `);
+
+  res.json({ questions: questions.map(q => ({ ...q, score: (q.upvotes || 0) - (q.downvotes || 0) })) });
+});
+
+// ── LEADERBOARD ────────────────────────────────────────────────────────────────
+
+router.get('/leaderboard', (req, res) => {
+  const users = queryAll(`
+    SELECT u.id, u.name, u.reputation,
+           COALESCE(qc.c, 0) as question_count,
+           COALESCE(ac.c, 0) as answer_count
+    FROM users u
+    LEFT JOIN (SELECT user_id, COUNT(*) as c FROM questions GROUP BY user_id) qc ON u.id = qc.user_id
+    LEFT JOIN (SELECT user_id, COUNT(*) as c FROM answers GROUP BY user_id) ac ON u.id = ac.user_id
+    WHERE u.email != 'anonymous@crowd.faq'
+    ORDER BY u.reputation DESC
+    LIMIT 20
+  `);
+
+  const leaderboard = users.map((u, i) => {
+    let badge = '';
+    if (u.reputation >= 200) badge = 'Gold';
+    else if (u.reputation >= 100) badge = 'Silver';
+    else if (u.reputation >= 50) badge = 'Bronze';
+
+    return {
+      rank: i + 1,
+      name: u.name,
+      sp: u.reputation,
+      badge,
+      questionCount: u.question_count,
+      answerCount: u.answer_count,
+    };
+  });
+
+  res.json({ leaderboard });
 });
 
 // ── STATS ───────────────────────────────────────────────────────────────────

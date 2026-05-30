@@ -1,11 +1,18 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Link } from 'react-router-dom';
 import {
   ThumbsUp, ThumbsDown, MessageCircle, Shield, Clock, CheckCircle,
-  ChevronDown, ChevronUp, Send, CornerDownRight, Loader, X, AlertCircle
+  ChevronDown, ChevronUp, Send, CornerDownRight, Loader, X, AlertCircle,
+  Trophy, ArrowUpDown, Sparkles,
 } from 'lucide-react';
+import { officialFAQs } from '../data/faqs.js';
+import { buildFAQIndex, searchFAQs, detectDuplicate } from '../utils/nlp-search.js';
+import { LeaderboardWidget } from '../components/Leaderboard.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 
-const CATEGORIES = ['About', 'NOC', 'Timing', 'Certificate', 'Work', 'Attendance', 'Rosetta', 'ViBe', 'General'];
+const CATEGORIES = ['About', 'NOC', 'Timing', 'Certificate', 'Work', 'Attendance', 'Interview', 'Rosetta', 'Phase 1', 'ViBe', 'Team Formation', 'General'];
+const FAQ_PROMOTION_THRESHOLD = 10;
 const API = 'http://localhost:3001/api';
 
 function normalise(str) {
@@ -120,6 +127,11 @@ function QuestionCard({ question, onVote, onToggleAnswer, expanded, onSubmitAnsw
                   <Clock size={9} /> Open
                 </span>
               )}
+              {question.is_faq === 1 && (
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-primary bg-primary/10 px-2 py-0.5 rounded-full flex items-center gap-1">
+                  <Trophy size={9} /> Promoted FAQ
+                </span>
+              )}
             </div>
 
             <h3 className="font-outfit font-semibold text-gray-100 mb-1.5 leading-snug">{question.title}</h3>
@@ -142,6 +154,12 @@ function QuestionCard({ question, onVote, onToggleAnswer, expanded, onSubmitAnsw
               <span className="flex items-center gap-1.5">
                 <Clock size={10} /> {timeAgo(question.created_at)}
               </span>
+              {/* FAQ promotion progress */}
+              {question.is_faq !== 1 && (question.score ?? 0) >= Math.floor(FAQ_PROMOTION_THRESHOLD * 0.5) && (
+                <span className="flex items-center gap-1.5 text-primary/70">
+                  <Trophy size={10} /> {question.score ?? 0}/{FAQ_PROMOTION_THRESHOLD} to FAQ
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -229,6 +247,24 @@ function AskModal({ open, onClose, onSubmit }) {
   const [category, setCategory] = useState('General');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [duplicates, setDuplicates] = useState([]);
+  const debounceRef = useRef(null);
+
+  // Duplicate detection on title change
+  const handleTitleChange = (val) => {
+    setTitle(val);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (val.trim().length >= 15) {
+      debounceRef.current = setTimeout(() => {
+        try {
+          const result = detectDuplicate(val, description);
+          setDuplicates(result.isDuplicate ? result.matches : []);
+        } catch { setDuplicates([]); }
+      }, 500);
+    } else {
+      setDuplicates([]);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -239,7 +275,7 @@ function AskModal({ open, onClose, onSubmit }) {
     const ok = await onSubmit({ title: title.trim(), description: description.trim(), category });
     setSubmitting(false);
     if (ok) {
-      setTitle(''); setDescription(''); setCategory('General');
+      setTitle(''); setDescription(''); setCategory('General'); setDuplicates([]);
       onClose();
     }
   };
@@ -268,9 +304,27 @@ function AskModal({ open, onClose, onSubmit }) {
               className="input-field"
               placeholder="e.g. Can I start the internship in August if my exams end in July?"
               value={title}
-              onChange={e => setTitle(e.target.value)}
+              onChange={e => handleTitleChange(e.target.value)}
               required
             />
+            {/* Duplicate detection */}
+            {duplicates.length > 0 && (
+              <div className="mt-2 px-3 py-2.5 rounded-lg bg-secondary/5 border border-secondary/15">
+                <p className="text-[10px] font-semibold text-secondary flex items-center gap-1 mb-1.5">
+                  <Sparkles size={10} /> Similar questions already exist:
+                </p>
+                {duplicates.map((d, i) => (
+                  <div key={i} className="text-[11px] text-gray-400 py-1 flex items-start gap-1.5">
+                    <span className="text-gray-600 mt-0.5">•</span>
+                    <span className="hover:text-gray-200 transition-colors">
+                      {d.faq.q || d.faq.title}
+                      <span className="text-[9px] text-gray-600 ml-1">({Math.round(d.similarity * 100)}% match)</span>
+                    </span>
+                  </div>
+                ))}
+                <p className="text-[9px] text-gray-600 mt-1.5">Check these first — your question may already be answered!</p>
+              </div>
+            )}
           </div>
           <div>
             <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1.5 block">Category</label>
@@ -295,13 +349,13 @@ function AskModal({ open, onClose, onSubmit }) {
           )}
           <div className="flex items-center gap-2 text-xs text-gray-600 bg-white/[0.03] rounded-lg px-3 py-2.5 border border-white/[0.05]">
             <Shield size={12} className="text-gray-600 flex-shrink-0" />
-            Posted anonymously · Questions with high votes may become Official FAQs
+            Your question will be tied to your account and earn you SP!
           </div>
           <div className="flex gap-3 justify-end pt-1">
             <button type="button" onClick={onClose} className="btn-ghost">Cancel</button>
             <button type="submit" disabled={submitting} className="btn-primary disabled:opacity-40 flex items-center gap-1.5">
               {submitting ? <Loader size={13} className="animate-spin" /> : null}
-              Post Anonymously →
+              Post Question →
             </button>
           </div>
         </form>
@@ -313,6 +367,7 @@ function AskModal({ open, onClose, onSubmit }) {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function CommunityPage() {
+  const { user, token } = useAuth();
   const [questions, setQuestions] = useState([]);
   const [filter, setFilter] = useState('all');
   const [sort, setSort] = useState('newest');
@@ -322,6 +377,11 @@ export default function CommunityPage() {
   const [loadingAnswers, setLoadingAnswers] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // Build NLP index for duplicate detection
+  useEffect(() => {
+    buildFAQIndex(officialFAQs.map(f => ({ ...f, source: 'official' })));
+  }, []);
 
   // Fetch questions on mount and filter change
   useEffect(() => {
@@ -395,9 +455,11 @@ export default function CommunityPage() {
 
     // Persist to backend
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
       await fetch(`${API}/community/questions/${targetId}/vote`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ direction, isQuestion }),
       });
     } catch { /* silent - already optimistically updated */ }
@@ -422,10 +484,21 @@ export default function CommunityPage() {
   };
 
   const handleSubmitQuestion = async ({ title, description, category }) => {
+    if (!user) {
+      setError('You must be logged in to ask a question.');
+      return false;
+    }
+    if (!user.is_verified) {
+      setError('You must verify your offer letter to ask a question.');
+      return false;
+    }
     try {
-      const res = await fetch(`${API}/community/questions`, {
+      const res = await fetch(`${API}/questions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}` 
+        },
         body: JSON.stringify({ title, description, category }),
       });
       if (!res.ok) throw new Error('Failed');
@@ -438,10 +511,21 @@ export default function CommunityPage() {
   };
 
   const handleSubmitAnswer = async (qId, content) => {
+    if (!user) {
+      setError('You must be logged in to answer.');
+      return;
+    }
+    if (!user.is_verified) {
+      setError('You must verify your offer letter to answer.');
+      return;
+    }
     try {
-      const res = await fetch(`${API}/community/questions/${qId}/answers`, {
+      const res = await fetch(`${API}/questions/${qId}/answers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({ content }),
       });
       if (!res.ok) throw new Error('Failed');
@@ -481,7 +565,16 @@ export default function CommunityPage() {
       {/* Controls */}
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
         className="flex flex-wrap items-center gap-3 mb-6">
-        <button onClick={() => setShowAsk(true)} className="btn-primary">+ Ask Question</button>
+        <button 
+          onClick={() => {
+            if (!user) setError('Please sign in to ask a question.');
+            else if (!user.is_verified) setError('Please verify your offer letter to ask questions.');
+            else setShowAsk(true);
+          }} 
+          className="btn-primary"
+        >
+          + Ask Question
+        </button>
 
         {/* Sort */}
         <div className="flex gap-2 ml-auto">
