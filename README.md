@@ -69,7 +69,7 @@ Access the faculty dashboard at: http://localhost:5173/faculty
 Faculty account:
 
 - **Email:** `faculty@admin.com`
-- **Password:** `faculty123`
+- **Password:** `demo1234`
 
 ### Faculty Modules Implemented
 
